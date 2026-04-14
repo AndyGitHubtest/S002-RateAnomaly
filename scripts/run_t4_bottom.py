@@ -1,7 +1,7 @@
 """T4: 止跌确认测试
 对T3扫描出的46个异常币逐一做止跌确认，输出4条件评分明细。
 """
-import sys, os, time
+import sys, os, time, traceback
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.database import Database
@@ -26,9 +26,28 @@ def main():
         symbol = a["symbol"]
         score_raw = a.get("anomaly_score", 0)
         try:
+            # 先手动跑4条件看明细
+            klines = db.get_klines(symbol, limit=50)
+            if len(klines) < 10:
+                rejected.append((symbol, score_raw))
+                continue
+            klines.sort(key=lambda x: x["ts"])
+            import numpy as np
+            closes = np.array([k["close"] for k in klines], dtype=np.float64)
+            volumes = np.array([k["volume"] for k in klines], dtype=np.float64)
+            highs = np.array([k["high"] for k in klines], dtype=np.float64)
+            lows = np.array([k["low"] for k in klines], dtype=np.float64)
+
+            c1 = confirmer._check_rate_decay(symbol, closes, a)
+            c2 = confirmer._check_volume_shrink(closes, volumes)
+            c3 = confirmer._check_no_new_low(symbol, closes)
+            c4 = confirmer._check_bullish_candle(closes, highs, lows)
+            total = c1 + c2 + c3 + c4
+            detail_line = f"c1(rate)={c1:.0f} c2(vol)={c2:.0f} c3(nolow)={c3:.0f} c4(bull)={c4:.0f} total={total:.0f}"
+
             result = confirmer.confirm(a)
             if result is None:
-                rejected.append((symbol, score_raw))
+                rejected.append((symbol, score_raw, detail_line))
             else:
                 cs = result["confirmation_score"]
                 pp = result["position_pct"]
@@ -46,7 +65,7 @@ def main():
                 else:
                     confirmed_70.append(entry)
         except Exception as e:
-            errors.append((symbol, str(e)))
+            errors.append((symbol, str(e), traceback.format_exc()))
 
     # ── 报告 ──
     print(f"\n{'='*60}")
@@ -84,8 +103,10 @@ def main():
 
     if rejected:
         print(f"\n--- 拒绝 (score<5000) ---")
-        for sym, sc in sorted(rejected, key=lambda x: -x[1])[:10]:
-            print(f"  {sym:16s} anomaly_score={sc:.0f}")
+        for item in sorted(rejected, key=lambda x: -x[1])[:15]:
+            sym, sc = item[0], item[1]
+            detail = item[2] if len(item) > 2 else ""
+            print(f"  {sym:16s} anomaly={sc:.0f} {detail}")
 
     if errors:
         print(f"\n--- 错误 ---")

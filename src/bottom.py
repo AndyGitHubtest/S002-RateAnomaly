@@ -71,13 +71,13 @@ class BottomConfirmer:
             return None
 
         # 更新异常状态
-        self.db.update_anomaly_confirmed(anomaly["anomaly_id"], score)
+        self.db.update_anomaly_confirmed(anomaly["id"], score)
 
         log.info("BOTTOM CONFIRMED %s: score=%.0f position=%.0f%% details=%s",
                  symbol, score, position_pct * 100, details)
 
         return {
-            "anomaly_id": anomaly["anomaly_id"],
+            "anomaly_id": anomaly["id"],
             "symbol": symbol,
             "confirmation_score": score,
             "position_pct": position_pct,
