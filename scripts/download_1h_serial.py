@@ -5,6 +5,7 @@ import asyncio
 import sqlite3
 import time
 import argparse
+import ssl
 import aiohttp
 from pathlib import Path
 
@@ -104,7 +105,11 @@ async def main():
 
     conn = init_db()
 
-    async with aiohttp.ClientSession() as session:
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    tcp_conn = aiohttp.TCPConnector(ssl=ssl_ctx)
+    async with aiohttp.ClientSession(connector=tcp_conn) as session:
         # 获取symbol列表
         symbols = await fetch_perp_symbols(session)
         if not symbols:

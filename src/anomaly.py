@@ -165,7 +165,7 @@ class AnomalyDetector:
         return top_n
 
     def _estimate_percentile(self, value: float, percentiles: dict) -> float:
-        """估算值在分布中的分位(插值)"""
+        """估算值在分布中的分位(插值+外推)"""
         sorted_pcts = sorted(percentiles.items(), key=lambda x: x[1])
         for i, (key, pval) in enumerate(sorted_pcts):
             if value <= pval:
@@ -174,8 +174,18 @@ class AnomalyDetector:
                 prev_key, prev_val = sorted_pcts[i - 1]
                 prev_pct = float(prev_key.replace("p", "")) / 100
                 curr_pct = float(key.replace("p", "")) / 100
-                if prev_val == curr_val:
+                if prev_val == pval:
                     return curr_pct
-                ratio = (value - prev_val) / (curr_val - prev_val)
+                ratio = (value - prev_val) / (pval - prev_val)
                 return prev_pct + ratio * (curr_pct - prev_pct)
+        # 超过最大分位(p99): 基于p95→p99斜率外推，cap 0.999
+        if len(sorted_pcts) >= 2:
+            last_key, last_val = sorted_pcts[-1]
+            prev_key, prev_val = sorted_pcts[-2]
+            last_pct = float(last_key.replace("p", "")) / 100
+            prev_pct = float(prev_key.replace("p", "")) / 100
+            if last_val > prev_val:
+                slope = (last_pct - prev_pct) / (last_val - prev_val)
+                extrapolated = last_pct + slope * (value - last_val)
+                return min(extrapolated, 0.999)
         return 0.99
