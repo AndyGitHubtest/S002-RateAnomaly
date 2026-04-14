@@ -16,8 +16,8 @@ class AnomalyDetector:
         self.db = db
 
     def scan_all(self) -> list[dict]:
-        """扫描所有币种，返回异常币种列表"""
-        symbols = self.db.get_symbols()
+        """扫描成交量Top50币种，返回异常币种列表"""
+        symbols = self.db.get_top_volume_symbols(top_n=50)
         now_ms = int(time.time() * 1000)
         anomalies = []
 
@@ -26,7 +26,8 @@ class AnomalyDetector:
             if result is not None:
                 anomalies.append(result)
 
-        log.info("Anomaly scan: %d/%d symbols flagged", len(anomalies), len(symbols))
+        log.info("Anomaly scan: %d/%d symbols flagged (top50 volume)",
+                 len(anomalies), len(symbols))
         return anomalies
 
     def check_symbol(self, symbol: str, now_ms: int) -> Optional[dict]:

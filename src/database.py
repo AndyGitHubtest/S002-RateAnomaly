@@ -196,6 +196,23 @@ class Database:
         ).fetchall()
         return [r["symbol"] for r in rows]
 
+    def get_top_volume_symbols(self, top_n: int = 50) -> list[str]:
+        """获取24h成交量Top N币种"""
+        max_ts = self.conn.execute(
+            "SELECT MAX(ts) FROM klines_1h"
+        ).fetchone()[0]
+        if max_ts is None:
+            return []
+        rows = self.conn.execute(
+            """SELECT symbol FROM klines_1h
+               WHERE ts >= ? - 86400000
+               GROUP BY symbol
+               ORDER BY SUM(quote_volume) DESC
+               LIMIT ?""",
+            (max_ts, top_n)
+        ).fetchall()
+        return [r["symbol"] for r in rows]
+
     def get_kline_count(self, symbol: str) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) as cnt FROM klines_1h WHERE symbol=?", (symbol,)
