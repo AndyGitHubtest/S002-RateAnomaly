@@ -5,6 +5,7 @@
 """
 import sys
 import os
+import json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.database import Database
@@ -93,7 +94,7 @@ def main():
                 "SELECT * FROM positions WHERE id=?", (pos_id,)
             ).fetchone()
             pos_dict = dict(pos)
-            layers = eval(pos_dict["layers"]) if isinstance(pos_dict["layers"], str) else pos_dict["layers"]
+            layers = json.loads(pos_dict["layers"]) if isinstance(pos_dict["layers"], str) else pos_dict["layers"]
 
             print(f"  ✅ 入场成功: id={pos_id}")
             print(f"     入场价={pos_dict['entry_price']:.6f}  "
