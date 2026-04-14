@@ -39,6 +39,7 @@ class Database:
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         symbol TEXT NOT NULL,
         ts INTEGER NOT NULL,
+        scale TEXT NOT NULL DEFAULT '24h',
         decline_rate REAL,
         decline_amp REAL,
         rate_pctl REAL,
@@ -160,6 +161,11 @@ class Database:
             conn.commit()
         except Exception:
             pass  # 列已存在
+        try:
+            conn.execute("ALTER TABLE anomalies ADD COLUMN scale TEXT NOT NULL DEFAULT '24h'")
+            conn.commit()
+        except Exception:
+            pass  # 列已存在
         log.info("Database initialized: %s", self.db_path)
 
     @property
@@ -262,13 +268,13 @@ class Database:
 
     def save_anomaly(self, symbol: str, ts: int, decline_rate: float,
                      decline_amp: float, rate_pctl: float, amp_pctl: float,
-                     anomaly_score: float) -> int:
+                     anomaly_score: float, scale: str = "24h") -> int:
         conn = self.conn
         cur = conn.execute(
-            "INSERT INTO anomalies (symbol, ts, decline_rate, decline_amp, "
+            "INSERT INTO anomalies (symbol, ts, scale, decline_rate, decline_amp, "
             "rate_pctl, amp_pctl, anomaly_score, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
-            (symbol, ts, decline_rate, decline_amp, rate_pctl, amp_pctl, anomaly_score)
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (symbol, ts, scale, decline_rate, decline_amp, rate_pctl, amp_pctl, anomaly_score)
         )
         conn.commit()
         return cur.lastrowid

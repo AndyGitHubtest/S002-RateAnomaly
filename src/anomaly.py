@@ -115,7 +115,8 @@ class AnomalyDetector:
             decline_amp=stat["amp"],
             rate_pctl=rate_pctl,
             amp_pctl=amp_pctl,
-            anomaly_score=anomaly_score
+            anomaly_score=anomaly_score,
+            scale=best_scale
         )
 
         log.info("ANOMALY %s: scale=%s rate=%.4f(%.1fp) amp=%.4f(%.1fp) score=%.0f",
