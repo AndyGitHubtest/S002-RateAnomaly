@@ -39,6 +39,10 @@ class ProfitManager:
         if profit_pct <= 0:
             return  # 还在亏，不触发止盈
 
+        # 更新peak_pnl_pct(只升不降)
+        if profit_pct > pos.get("peak_pnl_pct", 0):
+            self.db.update_peak_pnl(position_id, profit_pct)
+
         # 从分布读取阈值
         profit_dist = self.db.get_distribution(symbol, Config.DIST_PROFIT,
                                                 "", "2y")
@@ -67,9 +71,11 @@ class ProfitManager:
         else:
             trailing_trigger = dd_dist["percentiles"].get("p75", 5.0) / 100 if dd_dist else 0.05
 
-        # 最低利润门槛(覆盖手续费)
-        total_cost_pct = 0.001  # 0.1% 手续费
-        min_profit_pct = total_cost_pct + max(0.05, pos["notional"] * 0.001) / pos["notional"]
+        # 最低利润门槛(覆盖手续费+最低利润)
+        # 手续费: 开0.1% + 平0.1% = 0.2%; 最低利润: max(0.5U, notional×0.15%)
+        total_cost_pct = 0.002  # 0.2% 开平手续费
+        min_profit_usd = max(0.5, pos["notional"] * 0.0015)
+        min_profit_pct = total_cost_pct + min_profit_usd / pos["notional"]
 
         # 检查止盈层级
         # 先查已执行的止盈
@@ -97,14 +103,20 @@ class ProfitManager:
                          symbol, profit_pct * 100, tp2_threshold * 100,
                          rebound_strength)
 
-        # Trailing(全部止盈后检查)
+        # Trailing(TP1触发后检查，平掉剩余全部仓位)
         if "tp1" in done_levels and "trailing" not in done_levels:
-            # 检查利润回撤
             if self._check_trailing(pos, trailing_trigger, min_profit_pct):
-                self._execute_tp(pos, "trailing", Config.TRAILING_CLOSE_PCT,
-                                 current_price)
-                log.info("TRAILING %s: triggered at profit=%.2f%%",
-                         symbol, profit_pct * 100)
+                # trailing平掉剩余全部仓位
+                closed_pct = sum(
+                    r[0] for r in self.db.conn.execute(
+                        "SELECT pct FROM take_profits WHERE position_id=?",
+                        (position_id,)
+                    ).fetchall()
+                )
+                remaining_pct = max(0.01, 1.0 - closed_pct)
+                self._execute_tp(pos, "trailing", remaining_pct, current_price)
+                log.info("TRAILING %s: triggered at profit=%.2f%%, closing %.0f%% remaining",
+                         symbol, profit_pct * 100, remaining_pct * 100)
 
     def _assess_rebound_strength(self, symbol: str,
                                   speed_dist: Optional[dict]) -> str:
@@ -137,23 +149,32 @@ class ProfitManager:
 
     def _check_trailing(self, pos: dict, trigger_pct: float,
                         min_profit_pct: float) -> bool:
-        """检查trailing条件: 利润回撤超过trigger_pct"""
-        # 从止盈记录获取peak profit
-        tps = self.db.conn.execute(
-            "SELECT MAX(pnl) as max_pnl FROM take_profits WHERE position_id=?",
-            (pos["id"],)
-        ).fetchone()
+        """检查trailing条件: 从peak利润回撤超过trigger_pct
+        peak_pnl_pct已在_check_position中实时更新到positions表
+        """
+        peak_pnl_pct = pos.get("peak_pnl_pct", 0)
+        if peak_pnl_pct <= 0:
+            return False
 
         current_pnl_pct = (pos["current_price"] - pos["entry_price"]) / pos["entry_price"]
 
-        # 简化: 如果当前利润低于peak利润的50%且利润回撤>trigger
-        # 需要tracking peak，这里用position的unrealized_pnl做近似
+        # 当前利润必须仍 > 最低利润门槛(覆盖手续费)
         if current_pnl_pct < min_profit_pct:
             return False
 
-        # 利润回撤检查: 从最高利润回撤超过trigger
-        # 实际需要记录peak，这里先简化
-        return False  # TODO: 需要持久化peak_pnl到positions表
+        # 从peak回撤幅度
+        drawdown_from_peak = peak_pnl_pct - current_pnl_pct
+        if drawdown_from_peak < 0:
+            drawdown_from_peak = 0  # 当前创新高，无回撤
+
+        # 回撤超过trigger → 触发trailing
+        if drawdown_from_peak >= trigger_pct:
+            log.info("TRAILING TRIGGER %s: peak=%.2f%% current=%.2f%% drawdown=%.2f%% >= trigger=%.2f%%",
+                     pos["symbol"], peak_pnl_pct * 100, current_pnl_pct * 100,
+                     drawdown_from_peak * 100, trigger_pct * 100)
+            return True
+
+        return False
 
     def _execute_tp(self, pos: dict, tp_level: str, close_pct: float,
                     price: float):
@@ -170,10 +191,9 @@ class ProfitManager:
             pnl=pnl
         )
 
-        # 如果是trailing(最后40%)，关闭整个仓位
+        # 如果是trailing(平剩余全部)，关闭整个仓位
         if tp_level == "trailing":
-            remaining_pnl = (price - pos["entry_price"]) * pos["total_qty"] * (1 - Config.TP1_CLOSE_PCT - Config.TP2_CLOSE_PCT)
-            total_pnl = pnl + remaining_pnl
-            self.db.close_position(pos["id"], f"tp_{tp_level}", total_pnl)
+            # trailing的pnl已经包含了剩余全部仓位的利润
+            self.db.close_position(pos["id"], f"tp_{tp_level}", pnl)
             log.info("POSITION CLOSED %s via %s: pnl=%.4f",
-                     pos["symbol"], tp_level, total_pnl)
+                     pos["symbol"], tp_level, pnl)

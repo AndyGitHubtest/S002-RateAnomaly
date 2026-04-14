@@ -67,7 +67,8 @@ class Database:
         close_reason TEXT,
         close_ts INTEGER,
         realized_pnl REAL DEFAULT 0,
-        unrealized_pnl REAL DEFAULT 0
+        unrealized_pnl REAL DEFAULT 0,
+        peak_pnl_pct REAL DEFAULT 0
     );
 
     -- 5. 止盈
@@ -153,6 +154,12 @@ class Database:
         conn = self._get_conn()
         conn.executescript(self.SCHEMA_SQL)
         conn.commit()
+        # 兼容老DB: 添加新列(如果不存在)
+        try:
+            conn.execute("ALTER TABLE positions ADD COLUMN peak_pnl_pct REAL DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass  # 列已存在
         log.info("Database initialized: %s", self.db_path)
 
     @property
@@ -329,6 +336,15 @@ class Database:
         conn.execute(
             "UPDATE positions SET current_price=?, unrealized_pnl=? WHERE id=?",
             (current_price, unrealized_pnl, position_id)
+        )
+        conn.commit()
+
+    def update_peak_pnl(self, position_id: int, peak_pnl_pct: float):
+        """更新持仓的最高利润率(只升不降)"""
+        conn = self.conn
+        conn.execute(
+            "UPDATE positions SET peak_pnl_pct=? WHERE id=? AND peak_pnl_pct<?",
+            (peak_pnl_pct, position_id, peak_pnl_pct)
         )
         conn.commit()
 
