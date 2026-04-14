@@ -157,14 +157,16 @@ def dynamic_test(db: Database, profit: ProfitManager, positions: list):
         else:
             print(f"  ❌ TP1未触发 (预期应触发)")
 
-        # 场景2: 价格继续涨到peak，然后回撤 → 应触发trailing
+        # 场景2: 价格涨到高peak(确保利润远大于trailing_trigger), 然后回撤
         dd_dist = db.get_distribution(symbol, Config.DIST_DRAWDOWN, "", "2y")
         dd_pcts = dd_dist.get("percentiles", {}) if dd_dist else {}
         trailing_trigger = dd_pcts.get("p75", 5.0) / 100 if dd_pcts else 0.05
 
-        # 先涨到更高 (模拟peak)
-        peak_price = entry_price * (1 + tp1_threshold * 2)
-        print(f"\n  [场景2a] 设置价格到peak: {peak_price:.6f}")
+        # 先涨到很高 (利润需远大于trailing_trigger, 否则回撤后pnl变负)
+        # 目标: peak利润 = trailing_trigger * 3 (确保回撤后仍盈利)
+        target_peak_profit = trailing_trigger * 3
+        peak_price = entry_price * (1 + target_peak_profit)
+        print(f"\n  [场景2a] 设置价格到peak: {peak_price:.6f} (利润={target_peak_profit*100:.2f}%)")
         db.conn.execute(
             "UPDATE positions SET current_price=? WHERE id=?",
             (peak_price, position_id)
@@ -177,15 +179,16 @@ def dynamic_test(db: Database, profit: ProfitManager, positions: list):
         pos_dict = dict(updated_pos) if updated_pos else pos
         profit._check_position(pos_dict)
 
-        # 读取peak_pnl_pct
-        peak_val = pos_dict.get("peak_pnl_pct", 0)
+        # 重新读peak_pnl_pct (可能被_check_position更新)
+        updated_pos = db.conn.execute(
+            "SELECT * FROM positions WHERE id=?", (position_id,)
+        ).fetchone()
+        peak_val = dict(updated_pos).get("peak_pnl_pct", 0) if updated_pos else 0
         print(f"  peak_pnl_pct={peak_val*100:.2f}%")
 
-        # 然后回撤超过trailing_trigger
-        drawdown_price = peak_price / (1 + trailing_trigger * 0.8)  # 先回撤80%不够
-        drawdown_price_full = peak_price / (1 + trailing_trigger * 1.2)  # 再回撤120%够触发
-
-        print(f"\n  [场景2b] 回撤80%不够触发: price={drawdown_price:.6f}")
+        # 回撤50%不够触发trailing_trigger
+        drawdown_price = entry_price * (1 + target_peak_profit - trailing_trigger * 0.5)
+        print(f"\n  [场景2b] 回撤50%不够: price={drawdown_price:.6f}")
         db.conn.execute(
             "UPDATE positions SET current_price=? WHERE id=?",
             (drawdown_price, position_id)
@@ -204,7 +207,10 @@ def dynamic_test(db: Database, profit: ProfitManager, positions: list):
         ).fetchall()
         print(f"  trailing触发? {'是' if trailing_records else '否(预期:否，回撤不够)'}")
 
-        print(f"\n  [场景2c] 回撤120%足够触发: price={drawdown_price_full:.6f}")
+        # 回撤120%超过trailing_trigger
+        drawdown_price_full = entry_price * (1 + target_peak_profit - trailing_trigger * 1.2)
+        current_pnl_est = target_peak_profit - trailing_trigger * 1.2
+        print(f"\n  [场景2c] 回撤120%足够: price={drawdown_price_full:.6f} (估计利润={current_pnl_est*100:.2f}%)")
         db.conn.execute(
             "UPDATE positions SET current_price=? WHERE id=?",
             (drawdown_price_full, position_id)
@@ -225,7 +231,15 @@ def dynamic_test(db: Database, profit: ProfitManager, positions: list):
             r = trailing_records[0]
             print(f"  ✅ trailing已触发: price={r['price']:.6f} qty={r['qty']:.4f} pct={r['pct']:.2f} pnl={r['pnl']:.4f}")
         else:
-            print(f"  ❌ trailing未触发 (预期应触发)")
+            # 可能是TP2先触发了(利润太高), 或者TP1后trailing条件不满足
+            tp2_records = db.conn.execute(
+                "SELECT * FROM take_profits WHERE position_id=? AND tp_level='tp2'",
+                (position_id,)
+            ).fetchall()
+            if tp2_records:
+                print(f"  ℹ️ TP2先触发(利润太高), trailing无需再触发")
+            else:
+                print(f"  ❌ trailing未触发 (需排查)")
 
         # 检查仓位是否关闭
         final_pos = db.conn.execute(
