@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""T6: 止盈逻辑模拟出场测试
-从T5创建的持仓 → 模拟不同价格场景 → 测试TP1/TP2/Trailing触发
+"""T6: 止盈逻辑完整测试
+1. 静态报告: TP1/TP2/Trailing阈值 + 手续费覆盖检查
+2. 动态模拟: 模拟价格变化 → 调用profit.check_all() → 验证止盈触发
 """
 import sys
 import os
@@ -12,18 +13,20 @@ from src.profit import ProfitManager
 from src.config import Config
 
 
-def simulate_exit(db: Database, profit: ProfitManager):
-    """模拟止盈场景"""
+def static_report(db: Database, profit: ProfitManager):
+    """静态报告: TP1/TP2/Trailing阈值"""
     positions = db.get_open_positions()
     if not positions:
         print("无持仓，先跑T5")
-        return
+        return []
 
     print("=" * 60)
-    print("T6 止盈逻辑模拟出场报告")
+    print("T6-A 静止盈阈值报告")
     print("=" * 60)
     print(f"持仓数: {len(positions)}")
-    print()
+
+    tp1_list = []
+    tp2_list = []
 
     for pos in positions:
         symbol = pos["symbol"]
@@ -32,6 +35,7 @@ def simulate_exit(db: Database, profit: ProfitManager):
 
         print(f"\n--- {symbol} ---")
         print(f"  entry_price={entry_price:.6f}  notional={notional:.2f}")
+        print(f"  peak_pnl_pct={pos.get('peak_pnl_pct', 0)*100:.2f}%")
 
         # 读取profit分布
         profit_dist = db.get_distribution(symbol, Config.DIST_PROFIT, "", "2y")
@@ -43,6 +47,9 @@ def simulate_exit(db: Database, profit: ProfitManager):
         tp1_threshold = pcts.get("p50", 5.0) / 100
         tp2_normal = pcts.get("p75", 10.0) / 100
         tp2_strong = pcts.get("p90", 15.0) / 100
+
+        tp1_list.append(pcts.get("p50", 5.0))
+        tp2_list.append(pcts.get("p75", 10.0))
 
         print(f"  profit分布: p50={pcts.get('p50', 'N/A')}% p75={pcts.get('p75', 'N/A')}% p90={pcts.get('p90', 'N/A')}%")
         print(f"  TP1阈值={tp1_threshold*100:.2f}%  TP2(正常)={tp2_normal*100:.2f}%  TP2(强反弹)={tp2_strong*100:.2f}%")
@@ -75,49 +82,165 @@ def simulate_exit(db: Database, profit: ProfitManager):
             profit_usd = (sim_price - entry_price) * pos["total_qty"]
             print(f"    {name}: price={sim_price:.6f} profit={profit_pct:.2f}% (${profit_usd:.2f})")
 
-        # 计算手续费
-        fee_pct = 0.001 * 2  # 开仓+平仓
-        breakeven_pct = fee_pct * 100
-        print(f"\n  手续费: {breakeven_pct:.2f}% (开+平)")
-
-        # 检查TP1是否覆盖手续费
-        if tp1_threshold * 100 < breakeven_pct:
-            print(f"  ⚠️ TP1阈值({tp1_threshold*100:.2f}%) < 手续费({breakeven_pct:.2f}%) — TP1会亏钱!")
+        # 手续费覆盖检查
+        fee_pct = 0.001 * 2
+        min_profit_usd = max(0.5, notional * 0.0015)
+        min_profit_pct = fee_pct + min_profit_usd / notional
+        print(f"\n  手续费: {fee_pct*100:.2f}%  最低利润门槛: {min_profit_pct*100:.2f}%")
+        if tp1_threshold * 100 < min_profit_pct * 100:
+            print(f"  ⚠️ TP1阈值({tp1_threshold*100:.2f}%) < 最低利润门槛({min_profit_pct*100:.2f}%) — TP1会亏钱!")
         else:
-            print(f"  ✅ TP1阈值({tp1_threshold*100:.2f}%) > 手续费({breakeven_pct:.2f}%) — TP1能覆盖成本")
+            print(f"  ✅ TP1阈值({tp1_threshold*100:.2f}%) > 最低利润门槛({min_profit_pct*100:.2f}%) — TP1能覆盖成本")
 
     # 汇总
-    print("\n" + "=" * 60)
-    print("T6 汇总")
+    print(f"\n{'=' * 60}")
+    print("T6-A 汇总")
     print("=" * 60)
-
-    # 统计所有持仓的TP阈值分布
-    tp1_list = []
-    tp2_list = []
-    for pos in positions:
-        symbol = pos["symbol"]
-        profit_dist = db.get_distribution(symbol, Config.DIST_PROFIT, "", "2y")
-        if profit_dist:
-            pcts = profit_dist.get("percentiles", {})
-            tp1_list.append(pcts.get("p50", 5.0))
-            tp2_list.append(pcts.get("p75", 10.0))
-
     if tp1_list:
         print(f"  TP1(p50)范围: {min(tp1_list):.2f}% ~ {max(tp1_list):.2f}%  平均={sum(tp1_list)/len(tp1_list):.2f}%")
         print(f"  TP2(p75)范围: {min(tp2_list):.2f}% ~ {max(tp2_list):.2f}%  平均={sum(tp2_list)/len(tp2_list):.2f}%")
 
-    # trailing状态
-    print(f"\n  ⚠️ Trailing逻辑未实现 (_check_trailing返回False)")
-    print(f"  需要添加: peak_pnl持久化到positions表")
+    return positions
 
-    # 检查take_profits表是否存在
-    tp_table = db.conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='take_profits'"
-    ).fetchall()
-    print(f"  take_profits表: {'存在' if tp_table else '不存在'}")
+
+def dynamic_test(db: Database, profit: ProfitManager, positions: list):
+    """动态模拟: 修改current_price → 调用profit.check_all() → 验证止盈触发"""
+    if not positions:
+        return
+
+    print(f"\n{'=' * 60}")
+    print("T6-B 动态止盈触发测试")
+    print("=" * 60)
+
+    for pos in positions:
+        symbol = pos["symbol"]
+        entry_price = pos["entry_price"]
+        position_id = pos["id"]
+        notional = pos["notional"]
+
+        # 读取profit分布
+        profit_dist = db.get_distribution(symbol, Config.DIST_PROFIT, "", "2y")
+        if profit_dist is None:
+            continue
+
+        pcts = profit_dist.get("percentiles", {})
+        tp1_threshold = pcts.get("p50", 5.0) / 100
+
+        print(f"\n--- {symbol} 动态测试 ---")
+        print(f"  entry={entry_price:.6f}  TP1阈值={tp1_threshold*100:.2f}%")
+
+        # 场景1: 价格涨到TP1 → 应触发TP1
+        tp1_price = entry_price * (1 + tp1_threshold)
+        print(f"\n  [场景1] 设置价格到TP1: {tp1_price:.6f}")
+        db.conn.execute(
+            "UPDATE positions SET current_price=? WHERE id=?",
+            (tp1_price, position_id)
+        )
+        db.conn.commit()
+
+        # 重新读取position (含peak_pnl_pct)
+        updated_pos = db.conn.execute(
+            "SELECT * FROM positions WHERE id=?", (position_id,)
+        ).fetchone()
+        pos_dict = dict(updated_pos) if updated_pos else pos
+
+        profit._check_position(pos_dict)
+
+        # 检查TP1是否记录
+        tp1_records = db.conn.execute(
+            "SELECT * FROM take_profits WHERE position_id=? AND tp_level='tp1'",
+            (position_id,)
+        ).fetchall()
+        if tp1_records:
+            r = tp1_records[0]
+            print(f"  ✅ TP1已触发: price={r['price']:.6f} qty={r['qty']:.4f} pct={r['pct']:.2f} pnl={r['pnl']:.4f}")
+        else:
+            print(f"  ❌ TP1未触发 (预期应触发)")
+
+        # 场景2: 价格继续涨到peak，然后回撤 → 应触发trailing
+        dd_dist = db.get_distribution(symbol, Config.DIST_DRAWDOWN, "", "2y")
+        dd_pcts = dd_dist.get("percentiles", {}) if dd_dist else {}
+        trailing_trigger = dd_pcts.get("p75", 5.0) / 100 if dd_pcts else 0.05
+
+        # 先涨到更高 (模拟peak)
+        peak_price = entry_price * (1 + tp1_threshold * 2)
+        print(f"\n  [场景2a] 设置价格到peak: {peak_price:.6f}")
+        db.conn.execute(
+            "UPDATE positions SET current_price=? WHERE id=?",
+            (peak_price, position_id)
+        )
+        db.conn.commit()
+
+        updated_pos = db.conn.execute(
+            "SELECT * FROM positions WHERE id=?", (position_id,)
+        ).fetchone()
+        pos_dict = dict(updated_pos) if updated_pos else pos
+        profit._check_position(pos_dict)
+
+        # 读取peak_pnl_pct
+        peak_val = pos_dict.get("peak_pnl_pct", 0)
+        print(f"  peak_pnl_pct={peak_val*100:.2f}%")
+
+        # 然后回撤超过trailing_trigger
+        drawdown_price = peak_price / (1 + trailing_trigger * 0.8)  # 先回撤80%不够
+        drawdown_price_full = peak_price / (1 + trailing_trigger * 1.2)  # 再回撤120%够触发
+
+        print(f"\n  [场景2b] 回撤80%不够触发: price={drawdown_price:.6f}")
+        db.conn.execute(
+            "UPDATE positions SET current_price=? WHERE id=?",
+            (drawdown_price, position_id)
+        )
+        db.conn.commit()
+
+        updated_pos = db.conn.execute(
+            "SELECT * FROM positions WHERE id=?", (position_id,)
+        ).fetchone()
+        pos_dict = dict(updated_pos) if updated_pos else pos
+        profit._check_position(pos_dict)
+
+        trailing_records = db.conn.execute(
+            "SELECT * FROM take_profits WHERE position_id=? AND tp_level='trailing'",
+            (position_id,)
+        ).fetchall()
+        print(f"  trailing触发? {'是' if trailing_records else '否(预期:否，回撤不够)'}")
+
+        print(f"\n  [场景2c] 回撤120%足够触发: price={drawdown_price_full:.6f}")
+        db.conn.execute(
+            "UPDATE positions SET current_price=? WHERE id=?",
+            (drawdown_price_full, position_id)
+        )
+        db.conn.commit()
+
+        updated_pos = db.conn.execute(
+            "SELECT * FROM positions WHERE id=?", (position_id,)
+        ).fetchone()
+        pos_dict = dict(updated_pos) if updated_pos else pos
+        profit._check_position(pos_dict)
+
+        trailing_records = db.conn.execute(
+            "SELECT * FROM take_profits WHERE position_id=? AND tp_level='trailing'",
+            (position_id,)
+        ).fetchall()
+        if trailing_records:
+            r = trailing_records[0]
+            print(f"  ✅ trailing已触发: price={r['price']:.6f} qty={r['qty']:.4f} pct={r['pct']:.2f} pnl={r['pnl']:.4f}")
+        else:
+            print(f"  ❌ trailing未触发 (预期应触发)")
+
+        # 检查仓位是否关闭
+        final_pos = db.conn.execute(
+            "SELECT status, close_reason FROM positions WHERE id=?",
+            (position_id,)
+        ).fetchone()
+        if final_pos and final_pos["status"] == "closed":
+            print(f"  ✅ 仓位已关闭: reason={final_pos['close_reason']}")
+        else:
+            print(f"  ⚠️ 仓位仍open (trailing应关闭仓位)")
 
 
 if __name__ == "__main__":
     db = Database()
     profit = ProfitManager(db)
-    simulate_exit(db, profit)
+
+    positions = static_report(db, profit)
+    dynamic_test(db, profit, positions)
