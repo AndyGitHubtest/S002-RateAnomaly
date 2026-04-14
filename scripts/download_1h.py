@@ -1,15 +1,16 @@
 """S002 1H数据下载脚本 - 独立运行，不依赖主程序
-用法: python3 download_1h.py [--workers 5] [--years 2]
+用法: python3 download_1h.py [--workers 3] [--years 2]
 """
 import asyncio
 import sqlite3
 import time
-import json
 import argparse
 import aiohttp
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "klines_1h.db"
+# 使用项目根目录的data/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = PROJECT_ROOT / "data" / "klines_1h.db"
 BINANCE_KLINE = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_INFO = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 
@@ -45,22 +46,15 @@ async def fetch_perp_symbols(session):
                 and s["contractType"] == "PERPETUAL"
                 and s["status"] == "TRADING"):
             symbols.append(s["symbol"])
-    return symbols
+    return sorted(symbols)
 
 
-async def download_symbol(session, symbol, sem, conn, years):
+async def download_symbol(session, symbol, sem, years):
+    """下载单个symbol的1H数据，返回行列表"""
     async with sem:
         try:
             now_ms = int(time.time() * 1000)
             start_ms = now_ms - years * 365 * 24 * 3600 * 1000
-
-            # 检查已有数据
-            row = conn.execute(
-                "SELECT MAX(ts) as max_ts, COUNT(*) as cnt FROM klines_1h WHERE symbol=?",
-                (symbol,)
-            ).fetchone()
-            if row and row[0] and row[1] >= years * 365 * 24 * 0.9:
-                start_ms = row[0] + 3600 * 1000  # 增量
 
             all_rows = []
             current = start_ms
@@ -73,6 +67,8 @@ async def download_symbol(session, symbol, sem, conn, years):
                 }
                 async with session.get(BINANCE_KLINE, params=params) as resp:
                     if resp.status != 200:
+                        text = await resp.text()
+                        print(f"  HTTP {resp.status} for {symbol}: {text[:100]}")
                         break
                     data = await resp.json()
                 if not data:
@@ -86,23 +82,15 @@ async def download_symbol(session, symbol, sem, conn, years):
                 current = int(data[-1][0]) + 3600 * 1000
                 await asyncio.sleep(0.05)
 
-            if all_rows:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO klines_1h "
-                    "(ts, symbol, open, high, low, close, volume, quote_volume, trades) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
-                    all_rows
-                )
-                conn.commit()
-            return len(all_rows)
+            return all_rows
         except Exception as e:
             print(f"  ERROR {symbol}: {e}")
-            return 0
+            return []
 
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workers", type=int, default=5)
+    parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--years", type=int, default=2)
     args = parser.parse_args()
 
@@ -113,28 +101,57 @@ async def main():
         symbols = await fetch_perp_symbols(session)
         print(f"Found {len(symbols)} USDT perpetual symbols")
 
+        # 检查已下载的symbol
+        existing = conn.execute(
+            "SELECT symbol, COUNT(*) as cnt FROM klines_1h GROUP BY symbol"
+        ).fetchall()
+        existing_set = {s for s, cnt in existing if cnt >= args.years * 365 * 24 * 0.9}
+        to_download = [s for s in symbols if s not in existing_set]
+        print(f"Already have: {len(existing_set)}, Need to download: {len(to_download)}")
+
+        if not to_download:
+            print("All symbols already downloaded!")
+            conn.close()
+            return
+
         start = time.time()
         total_candles = 0
         done = 0
 
-        # 分批下载，每批20个
-        batch_size = 20
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i:i + batch_size]
-            tasks = [download_symbol(session, s, sem, conn, args.years)
+        # 分批下载，每批10个，减少并发避免API限流和SQLite锁
+        batch_size = 10
+        for i in range(0, len(to_download), batch_size):
+            batch = to_download[i:i + batch_size]
+            tasks = [download_symbol(session, s, sem, args.years)
                      for s in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            batch_candles = sum(r for r in results if isinstance(r, int))
+
+            # 批量写入DB（主线程串行写入，避免SQLite并发问题）
+            batch_candles = 0
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"  Exception: {result}")
+                    continue
+                if result:
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO klines_1h "
+                        "(ts, symbol, open, high, low, close, volume, quote_volume, trades) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        result
+                    )
+                    batch_candles += len(result)
+            conn.commit()
+
             total_candles += batch_candles
             done += len(batch)
             elapsed = time.time() - start
             rate = done / elapsed if elapsed > 0 else 0
-            eta = (len(symbols) - done) / rate if rate > 0 else 0
-            print(f"  [{done}/{len(symbols)}] +{batch_candles} candles | "
+            eta = (len(to_download) - done) / rate if rate > 0 else 0
+            print(f"  [{done}/{len(to_download)}] +{batch_candles} candles | "
                   f"{elapsed:.0f}s elapsed, ETA {eta:.0f}s")
 
     elapsed = time.time() - start
-    print(f"\nDone: {len(symbols)} symbols, {total_candles} candles, {elapsed:.0f}s")
+    print(f"\nDone: {len(to_download)} symbols, {total_candles} candles, {elapsed:.0f}s")
 
     # 统计
     row = conn.execute("SELECT COUNT(DISTINCT symbol) as n, COUNT(*) as c FROM klines_1h").fetchone()
